@@ -21,6 +21,7 @@
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // ***********************************************************************
 
+using System.Collections.Generic;
 using System.Reflection;
 using NUnit.Framework;
 
@@ -30,11 +31,20 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
     public class NUnit3TestDiscovererTests
     {
         [Test]
-        public void VerifyNunit3TestDiscovererHasCategoryAttribute()
+        public void VerifyNUnit3TestDiscovererHasCategoryAttribute()
         {
             var attribute = typeof(NUnit3TestDiscoverer).GetTypeInfo().GetCustomAttribute(typeof(System.ComponentModel.CategoryAttribute));
-            Assert.IsNotNull(attribute);
-            Assert.AreEqual("managed", (attribute as System.ComponentModel.CategoryAttribute)?.Category);
+            Assert.That(attribute, Is.Not.Null);
+            Assert.That((attribute as System.ComponentModel.CategoryAttribute)?.Category, Is.EqualTo("managed"));
+        }
+
+        [Test]
+        public void ThatDiscovererNUnitEngineAdapterIsInitialized()
+        {
+            var sut = new NUnit3TestDiscoverer();
+            Assert.That(sut.NUnitEngineAdapter, Is.Not.Null);
+            sut.DiscoverTests(new List<string>(), null, null, null);
+            Assert.That(sut.NUnitEngineAdapter, Is.Not.Null);
         }
     }
 }

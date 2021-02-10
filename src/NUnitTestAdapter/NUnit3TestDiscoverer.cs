@@ -26,7 +26,9 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+#if LAUNCHDEBUGGER
 using System.Diagnostics;
+#endif
 using System.IO;
 using System.Linq;
 using System.Xml;
@@ -35,6 +37,7 @@ using Microsoft.VisualStudio.TestPlatform.ObjectModel.Adapter;
 using Microsoft.VisualStudio.TestPlatform.ObjectModel.Logging;
 using NUnit.Engine;
 using NUnit.VisualStudio.TestAdapter.Dump;
+using NUnit.VisualStudio.TestAdapter.Internal;
 using NUnit.VisualStudio.TestAdapter.NUnitEngine;
 
 namespace NUnit.VisualStudio.TestAdapter
@@ -48,11 +51,6 @@ namespace NUnit.VisualStudio.TestAdapter
     [Category("managed")]
     public sealed class NUnit3TestDiscoverer : NUnitTestAdapter, ITestDiscoverer
     {
-        public NUnit3TestDiscoverer()
-        {
-            EmbeddedAssemblyResolution.EnsureInitialized();
-        }
-
         private DumpXml dumpXml;
 
         #region ITestDiscoverer Members
@@ -95,9 +93,11 @@ namespace NUnit.VisualStudio.TestAdapter
                     if (results.IsRunnable)
                     {
                         int cases;
-                        using (var testConverter = new TestConverter(TestLog, sourceAssemblyPath, Settings))
+                        using (var testConverter = new TestConverterForXml(TestLog, sourceAssemblyPath, Settings))
                         {
+                            var timing = new TimingLogger(Settings, TestLog);
                             cases = ProcessTestCases(results, discoverySink, testConverter);
+                            timing.LogTime("Discovery/Processing/Converting:");
                         }
 
                         TestLog.Debug($"Discovered {cases} test cases");
@@ -161,7 +161,7 @@ namespace NUnit.VisualStudio.TestAdapter
                 }
                 finally
                 {
-                    dumpXml?.Dump4Discovery();
+                    dumpXml?.DumpForDiscovery();
                     NUnitEngineAdapter?.CloseRunner();
                 }
             }
@@ -175,7 +175,7 @@ namespace NUnit.VisualStudio.TestAdapter
 
         #region Helper Methods
 
-        private int ProcessTestCases(NUnitResults results, ITestCaseDiscoverySink discoverySink, TestConverter testConverter)
+        private int ProcessTestCases(NUnitResults results, ITestCaseDiscoverySink discoverySink, TestConverterForXml testConverterForXml)
         {
             int cases = 0;
             foreach (XmlNode testNode in results.TestCases())
@@ -186,7 +186,7 @@ namespace NUnit.VisualStudio.TestAdapter
                     if (!Debugger.IsAttached)
                         Debugger.Launch();
 #endif
-                    var testCase = testConverter.ConvertTestCase(new NUnitTestCase(testNode));
+                    var testCase = testConverterForXml.ConvertTestCase(new NUnitEventTestCase(testNode));
                     discoverySink.SendTestCase(testCase);
                     cases += 1;
                 }

@@ -44,7 +44,7 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
     {
         private NUnitEventListener listener;
         private FakeFrameworkHandle testLog;
-        private NUnitTestCase fakeTestNode;
+        private NUnitEventTestCase fakeTestNode;
         private INUnit3TestExecutor executor;
         private IAdapterSettings settings;
 
@@ -55,17 +55,16 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
             settings = Substitute.For<IAdapterSettings>();
             executor = Substitute.For<INUnit3TestExecutor>();
             executor.Settings.Returns(settings);
+            executor.FrameworkHandle.Returns(testLog);
             settings.CollectSourceInformation.Returns(true);
-            using (var testConverter = new TestConverter(new TestLogger(new MessageLoggerStub()), FakeTestData.AssemblyPath, settings))
-            {
-                fakeTestNode = new NUnitTestCase(FakeTestData.GetTestNode());
+            using var testConverter = new TestConverterForXml(new TestLogger(new MessageLoggerStub()), FakeTestData.AssemblyPath, settings);
+            fakeTestNode = new NUnitEventTestCase(FakeTestData.GetTestNode());
 
-                // Ensure that the converted testcase is cached
-                testConverter.ConvertTestCase(fakeTestNode);
-                Assert.NotNull(testConverter.GetCachedTestCase("123"));
+            // Ensure that the converted testcase is cached
+            testConverter.ConvertTestCase(fakeTestNode);
+            Assert.That(testConverter.GetCachedTestCase("123"), Is.Not.Null);
 
-                listener = new NUnitEventListener(testLog, testConverter, executor);
-            }
+            listener = new NUnitEventListener(testConverter, executor);
         }
 
         #region TestStarted Tests
@@ -92,9 +91,8 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
             listener.TestFinished(new NUnitTestEventTestCase(FakeTestData.GetResultNode().AsString()));
             Assert.That(testLog.Events.Count, Is.EqualTo(2));
             Assert.That(testLog.Events[0].EventType, Is.EqualTo(FakeFrameworkHandle.EventType.RecordEnd));
-            Assert.AreEqual(
-                FakeFrameworkHandle.EventType.RecordResult,
-                testLog.Events[1].EventType);
+            Assert.That(
+                testLog.Events[1].EventType, Is.EqualTo(FakeFrameworkHandle.EventType.RecordResult));
         }
 
         [Test]
@@ -105,7 +103,7 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
             Assume.That(testLog.Events[0].EventType, Is.EqualTo(FakeFrameworkHandle.EventType.RecordEnd));
 
             VerifyTestCase(testLog.Events[0].TestCase);
-            Assert.AreEqual(TestOutcome.Passed, testLog.Events[0].TestOutcome);
+            Assert.That(testLog.Events[0].TestOutcome, Is.EqualTo(TestOutcome.Passed));
         }
 
         [Test]
@@ -172,7 +170,7 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
 
         private void VerifyTestCase(TestCase ourCase)
         {
-            Assert.NotNull(ourCase, "TestCase not set");
+            Assert.That(ourCase, Is.Not.Null, "TestCase not set");
             Assert.That(ourCase.DisplayName, Is.EqualTo(FakeTestData.DisplayName));
             Assert.That(ourCase.FullyQualifiedName, Is.EqualTo(FakeTestData.FullyQualifiedName));
             Assert.That(ourCase.Source, Is.EqualTo(FakeTestData.AssemblyPath));
@@ -185,89 +183,15 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
 
         private void VerifyTestResult(VSTestResult ourResult)
         {
-            Assert.NotNull(ourResult, "TestResult not set");
+            Assert.That(ourResult, Is.Not.Null, "TestResult not set");
             VerifyTestCase(ourResult.TestCase);
 
-            Assert.AreEqual(Environment.MachineName, ourResult.ComputerName);
-            Assert.AreEqual(TestOutcome.Passed, ourResult.Outcome);
-            Assert.AreEqual(null, ourResult.ErrorMessage);
-            Assert.AreEqual(TimeSpan.FromSeconds(1.234), ourResult.Duration);
+            Assert.That(ourResult.ComputerName, Is.EqualTo(Environment.MachineName));
+            Assert.That(ourResult.Outcome, Is.EqualTo(TestOutcome.Passed));
+            Assert.That(ourResult.ErrorMessage, Is.EqualTo(null));
+            Assert.That(ourResult.Duration, Is.EqualTo(TimeSpan.FromSeconds(1.234)));
         }
 
         #endregion
-    }
-
-    /// <summary>
-    /// These tests ensure correct console output, which is what we send to the "recorder".
-    /// </summary>
-    public class NUnitEventListenerOutputTests
-    {
-        private ITestExecutionRecorder recorder;
-        private ITestConverter converter;
-        private IDumpXml dumpxml;
-        private IAdapterSettings settings;
-        private INUnit3TestExecutor executor;
-
-
-        private const string TestOutputProgress =
-            @"<test-output stream='Progress' testid='0-1001' testname='Something.TestClass.Whatever'><![CDATA[Whatever
-]]></test-output>";
-
-        private const string TestOutputOut =
-            @"<test-output stream='Out' testid='0-1001' testname='Something.TestClass.Whatever'><![CDATA[Whatever
-]]></test-output>";
-
-        private const string TestOutputError =
-            @"<test-output stream='Error' testid='0-1001' testname='Something.TestClass.Whatever'><![CDATA[Whatever
-]]></test-output>";
-
-        private const string BlankTestOutput =
-            @"<test-output stream='Progress' testid='0-1001' testname='Something.TestClass.Whatever'><![CDATA[   ]]></test-output>";
-
-        private const string TestFinish =
-            @"<test-case id='0-1001' name='Test1' fullname='UnitTests.Test1' methodname='Test1' classname='UnitTests' runstate='Runnable' seed='108294034' result='Passed' start-time='2018-10-15 09:41:24Z' end-time='2018-10-15 09:41:24Z' duration='0.000203' asserts='0' parentId='0-1000' />";
-
-        [SetUp]
-        public void Setup()
-        {
-            recorder = Substitute.For<ITestExecutionRecorder>();
-            converter = Substitute.For<ITestConverter>();
-            dumpxml = Substitute.For<IDumpXml>();
-            settings = Substitute.For<IAdapterSettings>();
-            executor = Substitute.For<INUnit3TestExecutor>();
-            executor.Settings.Returns(settings);
-        }
-
-        [Test]
-        public void ThatNormalTestOutputIsOutput()
-        {
-            var sut = new NUnitEventListener(recorder, converter, executor);
-            sut.OnTestEvent(TestOutputProgress);
-            sut.OnTestEvent(TestFinish);
-
-            recorder.Received().SendMessage(Arg.Any<TestMessageLevel>(), Arg.Is<string>(x => x.StartsWith("Whatever")));
-            converter.Received().GetVsTestResults(Arg.Any<NUnitTestEventTestCase>(), Arg.Is<ICollection<XmlNode>>(x => x.Count == 1));
-        }
-
-        [Test]
-        public void ThatNormalTestOutputIsError()
-        {
-            var sut = new NUnitEventListener(recorder, converter, executor);
-            sut.OnTestEvent(TestOutputError);
-            sut.OnTestEvent(TestFinish);
-
-            recorder.Received().SendMessage(Arg.Any<TestMessageLevel>(), Arg.Is<string>(x => x.StartsWith("Whatever")));
-            converter.Received().GetVsTestResults(Arg.Any<NUnitTestEventTestCase>(), Arg.Is<ICollection<XmlNode>>(x => x.Count == 1));
-        }
-
-        [Test]
-        public void ThatTestOutputWithWhiteSpaceIsNotOutput()
-        {
-            var sut = new NUnitEventListener(recorder, converter, executor);
-
-            sut.OnTestEvent(BlankTestOutput);
-
-            recorder.DidNotReceive().SendMessage(Arg.Any<TestMessageLevel>(), Arg.Any<string>());
-        }
     }
 }

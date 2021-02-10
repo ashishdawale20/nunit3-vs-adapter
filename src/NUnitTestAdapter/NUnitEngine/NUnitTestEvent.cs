@@ -26,18 +26,30 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Runtime.Serialization;
 using System.Xml;
-using NUnit.VisualStudio.TestAdapter.Internal;
-using NUnit.VisualStudio.TestAdapter.NUnitEngine;
 
 namespace NUnit.VisualStudio.TestAdapter.NUnitEngine
 {
-    public interface INUnitTestEvent
+    public interface INUnitTestEventForXml
     {
         XmlNode Node { get; }
     }
 
 
-    public abstract class NUnitTestEvent : NUnitTestNode
+    public interface INUnitTestEvent : INUnitTestNode
+    {
+        string Output { get; }
+        TimeSpan Duration { get; }
+        IEnumerable<NUnitAttachment> NUnitAttachments { get; }
+        NUnitTestEvent.CheckedTime StartTime();
+        NUnitTestEvent.CheckedTime EndTime();
+
+        bool IsIgnored { get; }
+        NUnitTestEvent.ResultType Result();
+        bool IsFailed { get; }
+        NUnitTestEvent.SiteType Site();
+    }
+
+    public abstract class NUnitTestEvent : NUnitTestNode, INUnitTestEvent
     {
         public enum ResultType
         {
@@ -65,33 +77,25 @@ namespace NUnit.VisualStudio.TestAdapter.NUnitEngine
         public TestTypes TestType()
         {
             string type = Node.GetAttribute("type");
-            switch (type)
+            return type switch
             {
-                case "TestFixture":
-                    return TestTypes.TestFixture;
-                case "TestMethod":
-                    return TestTypes.TestMethod;
-                default:
-                    return TestTypes.NoIdea;
-            }
+                "TestFixture" => TestTypes.TestFixture,
+                "TestMethod" => TestTypes.TestMethod,
+                _ => TestTypes.NoIdea
+            };
         }
 
         public ResultType Result()
         {
             string res = Node.GetAttribute("result");
-            switch (res)
+            return res switch
             {
-                case "Failed":
-                    return ResultType.Failed;
-                case "Passed":
-                    return ResultType.Success;
-                case "Skipped":
-                    return ResultType.Skipped;
-                case "Warning":
-                    return ResultType.Warning;
-                default:
-                    return ResultType.NoIdea;
-            }
+                "Failed" => ResultType.Failed,
+                "Passed" => ResultType.Success,
+                "Skipped" => ResultType.Skipped,
+                "Warning" => ResultType.Warning,
+                _ => ResultType.NoIdea
+            };
         }
 
         public bool IsFailed => Result() == ResultType.Failed;
@@ -99,15 +103,12 @@ namespace NUnit.VisualStudio.TestAdapter.NUnitEngine
         public SiteType Site()
         {
             string site = Node.GetAttribute("site");
-            switch (site)
+            return site switch
             {
-                case "SetUp":
-                    return SiteType.Setup;
-                case "TearDown":
-                    return SiteType.TearDown;
-                default:
-                    return SiteType.NoIdea;
-            }
+                "SetUp" => SiteType.Setup,
+                "TearDown" => SiteType.TearDown,
+                _ => SiteType.NoIdea
+            };
         }
 
         public string Label => Node.GetAttribute("label");
@@ -132,7 +133,7 @@ namespace NUnit.VisualStudio.TestAdapter.NUnitEngine
         {
             string startTime = Node.GetAttribute("start-time");
             return startTime != null
-                ? new CheckedTime { Ok = true, Time = DateTimeOffset.Parse(startTime, CultureInfo.InvariantCulture) }
+                ? new CheckedTime { Ok = true, Time = DateTimeOffset.Parse(startTime, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal) }
                 : new CheckedTime { Ok = false, Time = DateTimeOffset.Now };
         }
 
@@ -140,7 +141,7 @@ namespace NUnit.VisualStudio.TestAdapter.NUnitEngine
         {
             string endTime = Node.GetAttribute("end-time");
             return endTime != null
-                ? new CheckedTime { Ok = true, Time = DateTimeOffset.Parse(endTime, CultureInfo.InvariantCulture) }
+                ? new CheckedTime { Ok = true, Time = DateTimeOffset.Parse(endTime, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal) }
                 : new CheckedTime { Ok = false, Time = DateTimeOffset.Now };
         }
 
@@ -149,64 +150,48 @@ namespace NUnit.VisualStudio.TestAdapter.NUnitEngine
             public bool Ok;
             public DateTimeOffset Time;
         }
-    }
 
-    /// <summary>
-    /// Handles the NUnit 'start-test' event.
-    /// </summary>
-    public class NUnitTestEventStartTest : NUnitTestEvent
-    {
-        public NUnitTestEventStartTest(INUnitTestEvent node) : this(node.Node)
-        { }
-        public NUnitTestEventStartTest(string testEvent) : this(XmlHelper.CreateXmlNode(testEvent))
-        { }
+        private List<NUnitAttachment> nUnitAttachments;
 
-        public NUnitTestEventStartTest(XmlNode node) : base(node)
+
+        public IEnumerable<NUnitAttachment> NUnitAttachments
         {
-            if (node.Name != "start-test")
-                throw new NUnitEventWrongTypeException($"Expected 'start-test', got {node.Name}");
-        }
-    }
-
-    /// <summary>
-    /// Handles the NUnit 'test-case' event.
-    /// </summary>
-    public class NUnitTestEventTestCase : NUnitTestEvent
-    {
-        public NUnitTestEventTestCase(INUnitTestEvent node) : this(node.Node)
-        {
-        }
-
-        public NUnitTestEventTestCase(string testEvent) : this(XmlHelper.CreateXmlNode(testEvent))
-        {
-        }
-
-        public NUnitFailure Failure { get; }
-
-        public NUnitTestEventTestCase(XmlNode node) : base(node)
-        {
-            if (node.Name != "test-case")
-                throw new NUnitEventWrongTypeException($"Expected 'test-case', got {node.Name}");
-            var failureNode = Node.SelectSingleNode("failure");
-            if (failureNode != null)
+            get
             {
-                Failure = new NUnitFailure(
-                    failureNode.SelectSingleNode("message")?.InnerText,
-                    failureNode.SelectSingleNode("stack-trace")?.InnerText);
+                if (nUnitAttachments != null)
+                    return nUnitAttachments;
+                nUnitAttachments = new List<NUnitAttachment>();
+                foreach (XmlNode attachment in Node.SelectNodes("attachments/attachment"))
+                {
+                    var path = attachment.SelectSingleNode("filePath")?.InnerText ?? string.Empty;
+                    var description = attachment.SelectSingleNode("description")?.InnerText;
+                    nUnitAttachments.Add(new NUnitAttachment(path, description));
+                }
+                return nUnitAttachments;
             }
-            ReasonMessage = Node.SelectSingleNode("reason/message")?.InnerText;
+        }
+    }
+
+
+    public class NUnitAttachment
+    {
+        public NUnitAttachment(string path, string description)
+        {
+            FilePath = path;
+            Description = description;
         }
 
-        public string ReasonMessage { get; }
+        public string FilePath { get; }
 
-        public bool HasReason => string.IsNullOrEmpty(ReasonMessage);
-        public bool HasFailure => Failure != null;
+        public string Description { get; }
     }
 
     public class NUnitProperty
     {
         public string Name { get; }
         public string Value { get; }
+
+        public bool IsInternal => Name.StartsWith("_", StringComparison.Ordinal);
 
         public NUnitProperty(string name, string value)
         {
@@ -227,36 +212,6 @@ namespace NUnit.VisualStudio.TestAdapter.NUnitEngine
         }
     }
 
-
-    /// <summary>
-    /// Handles the NUnit 'test-suite' event.
-    /// </summary>
-    public class NUnitTestEventSuiteFinished : NUnitTestEvent
-    {
-        public NUnitTestEventSuiteFinished(INUnitTestEvent node) : this(node.Node)
-        { }
-        public NUnitTestEventSuiteFinished(string testEvent) : this(XmlHelper.CreateXmlNode(testEvent))
-        { }
-
-        public NUnitTestEventSuiteFinished(XmlNode node) : base(node)
-        {
-            if (node.Name != "test-suite")
-                throw new NUnitEventWrongTypeException($"Expected 'test-suite', got {node.Name}");
-            var failureNode = Node.SelectSingleNode("failure");
-            if (failureNode != null)
-            {
-                FailureMessage = failureNode.SelectSingleNode("message")?.InnerText;
-            }
-            ReasonMessage = Node.SelectSingleNode("reason/message")?.InnerText;
-        }
-
-        public string ReasonMessage { get; }
-
-        public bool HasReason => !string.IsNullOrEmpty(ReasonMessage);
-        public string FailureMessage { get; }
-
-        public bool HasFailure => !string.IsNullOrEmpty(FailureMessage);
-    }
 
     [Serializable]
     public class NUnitEventWrongTypeException : Exception

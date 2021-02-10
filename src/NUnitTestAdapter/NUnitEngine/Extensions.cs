@@ -21,23 +21,22 @@
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // ***********************************************************************
 
-using System.Xml;
-using NUnit.VisualStudio.TestAdapter.Dump;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using NUnit.Engine;
+#pragma warning disable SA1618 // Generic type parameters should be documented
 
 namespace NUnit.VisualStudio.TestAdapter.NUnitEngine
 {
-    public class NUnitTestCase : NUnitTestNode
+    public static class Extensions
     {
-        public bool IsTestCase => !IsNull && Node.Name == "test-case";
-        public bool IsParameterizedMethod => Type == "ParameterizedMethod";
-        public string Type => Node.GetAttribute("type");
-        public string ClassName => Node.GetAttribute("classname");
-        public string MethodName => Node.GetAttribute("methodname");
+        /// <summary>
+        /// All will return true if seq is empty.  This returns false if sequence is empty.
+        /// </summary>
+        public static bool AllWithEmptyFalse<T>(this IEnumerable<T> list, Func<T, bool> pred) =>
+            list.All(pred) && list.Any();
 
-        public NUnitTestCase(XmlNode testCase) : base(testCase)
-        {
-        }
-
-        public NUnitTestCase Parent() => new NUnitTestCase(Node.ParentNode);
+        public static bool IsEmpty(this TestFilter filter) => filter == TestFilter.Empty;
     }
 }

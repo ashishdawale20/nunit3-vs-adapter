@@ -85,7 +85,13 @@ namespace NUnit.VisualStudio.TestAdapter
         // The adapter version
         protected string AdapterVersion { get; set; }
 
-        public NUnitEngineAdapter NUnitEngineAdapter { get; private set; }
+        private NUnitEngineAdapter nUnitEngineAdapter;
+
+        public NUnitEngineAdapter NUnitEngineAdapter
+        {
+            get => nUnitEngineAdapter ??= new NUnitEngineAdapter();
+            private set => nUnitEngineAdapter = value;
+        }
 
         // Our logger used to display messages
         protected TestLogger TestLog { get; private set; }
@@ -93,6 +99,7 @@ namespace NUnit.VisualStudio.TestAdapter
         protected string WorkDir { get; private set; }
 
         private static string exeName;
+
 
         public static bool IsRunningUnderIde
         {
@@ -141,6 +148,16 @@ namespace NUnit.VisualStudio.TestAdapter
                 TestLog.Warning("Error initializing RunSettings. Default settings will be used");
                 TestLog.Warning(e.ToString());
             }
+            finally
+            {
+#if NET35
+                string fw = "Net Framework";
+#else
+                string fw = "Net Core";
+#endif
+                var assLoc = Assembly.GetExecutingAssembly().Location;
+                TestLog.Debug($"{fw} adapter running from {assLoc}");
+            }
         }
 
         public void InitializeForbiddenFolders()
@@ -177,7 +194,7 @@ namespace NUnit.VisualStudio.TestAdapter
 
             if (Settings.ShadowCopyFiles)
             {
-                package.Settings[PackageSettings.ShadowCopyFiles] = "true";
+                package.Settings[PackageSettings.ShadowCopyFiles] = true;
                 TestLog.Debug("    Setting ShadowCopyFiles to true");
             }
 
@@ -228,6 +245,9 @@ namespace NUnit.VisualStudio.TestAdapter
 
             if (Settings.StopOnError)
                 package.Settings[PackageSettings.StopOnError] = true;
+
+            if (Settings.SkipNonTestAssemblies)
+                package.Settings[PackageSettings.SkipNonTestAssemblies] = true;
 
             // Always run one assembly at a time in process in its own domain
             package.Settings[PackageSettings.ProcessModel] = "InProcess";
@@ -284,6 +304,9 @@ namespace NUnit.VisualStudio.TestAdapter
             runSettings[PackageSettings.TestParameters] = oldFrameworkSerializedParameters.ToString(0, oldFrameworkSerializedParameters.Length - 1);
         }
 
+        /// <summary>
+        /// Ensure any channels registered by other adapters are unregistered.
+        /// </summary>
         protected static void CleanUpRegisteredChannels()
         {
 #if NET35
@@ -300,6 +323,6 @@ namespace NUnit.VisualStudio.TestAdapter
             NUnitEngineAdapter = null;
         }
 
-        #endregion
+#endregion
     }
 }

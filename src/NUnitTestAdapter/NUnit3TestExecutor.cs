@@ -29,12 +29,11 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Xml;
 using Microsoft.VisualStudio.TestPlatform.ObjectModel;
 using Microsoft.VisualStudio.TestPlatform.ObjectModel.Adapter;
 using NUnit.Engine;
-using NUnit.Engine.Services;
 using NUnit.VisualStudio.TestAdapter.Dump;
+using NUnit.VisualStudio.TestAdapter.Internal;
 using NUnit.VisualStudio.TestAdapter.NUnitEngine;
 
 namespace NUnit.VisualStudio.TestAdapter
@@ -44,27 +43,37 @@ namespace NUnit.VisualStudio.TestAdapter
         void StopRun();
         IDumpXml Dump { get; }
         IAdapterSettings Settings { get; }
+        IFrameworkHandle FrameworkHandle { get; }
+    }
+
+    public enum RunType
+    {
+        Unknown,
+        CommandLineLegacy,
+        CommandLineCurrentVSTest,
+        CommandLineCurrentNUnit,
+        Ide
     }
 
 
     [ExtensionUri(ExecutorUri)]
-    public sealed class NUnit3TestExecutor : NUnitTestAdapter, ITestExecutor, IDisposable, INUnit3TestExecutor
+    public sealed class NUnit3TestExecutor : NUnitTestAdapter, ITestExecutor, IDisposable, INUnit3TestExecutor, IExecutionContext
     {
-        private DumpXml executionDumpXml;
-
-        public NUnit3TestExecutor()
-        {
-            EmbeddedAssemblyResolution.EnsureInitialized();
-        }
-
         #region Properties
+
+        private RunType RunType { get; set; }
 
         // Properties set when either of the RunTests methods is called
         public IRunContext RunContext { get; private set; }
         public IFrameworkHandle FrameworkHandle { get; private set; }
-        private TfsTestFilter TfsFilter { get; set; }
 
-        private string TestOutputXmlFolder { get; set; } = "";
+        public IVsTestFilter VsTestFilter { get; private set; }
+
+        public ITestLogger Log => TestLog;
+
+        public INUnitEngineAdapter EngineAdapter => NUnitEngineAdapter;
+
+        public string TestOutputXmlFolder { get; set; } = "";
 
         // NOTE: an earlier version of this code had a FilterBuilder
         // property. This seemed to make sense, because we instantiate
@@ -102,13 +111,24 @@ namespace NUnit.VisualStudio.TestAdapter
                 return;
             }
 
+            SetRunTypeByStrings();
+            var builder = CreateTestFilterBuilder();
+            TestFilter filter = null;
+            if (RunType == RunType.CommandLineCurrentNUnit)
+            {
+                var vsTestFilter = VsTestFilterFactory.CreateVsTestFilter(Settings, runContext);
+                filter = builder.ConvertVsTestFilterToNUnitFilter(vsTestFilter);
+            }
+            if (filter == null)
+            {
+                filter = builder.FilterByWhere(Settings.Where);
+            }
+
             foreach (string assemblyName in sources)
             {
                 try
                 {
                     string assemblyPath = Path.IsPathRooted(assemblyName) ? assemblyName : Path.Combine(Directory.GetCurrentDirectory(), assemblyName);
-                    var filter = CreateTestFilterBuilder().FilterByWhere(Settings.Where);
-
                     RunAssembly(assemblyPath, null, filter);
                 }
                 catch (Exception ex)
@@ -121,6 +141,15 @@ namespace NUnit.VisualStudio.TestAdapter
             TestLog.Info($"NUnit Adapter {AdapterVersion}: Test execution complete");
             Unload();
         }
+
+        private void SetRunTypeByStrings() =>
+            RunType = !Settings.DesignMode
+                ? Settings.DiscoveryMethod == DiscoveryMethod.Legacy
+                    ? RunType.CommandLineLegacy
+                    : Settings.UseNUnitFilter
+                        ? RunType.CommandLineCurrentNUnit
+                        : RunType.CommandLineCurrentVSTest
+                : RunType.Ide;
 
         /// <summary>
         /// Called by the VisualStudio IDE when selected tests are to be run. Never called from TFS Build.
@@ -137,10 +166,12 @@ namespace NUnit.VisualStudio.TestAdapter
             Initialize(runContext, frameworkHandle);
             TestLog.Debug("RunTests by IEnumerable<TestCase>");
             InitializeForExecution(runContext, frameworkHandle);
+            RunType = RunType.Ide;
+            var timing = new TimingLogger(Settings, TestLog);
             Debug.Assert(NUnitEngineAdapter != null, "NUnitEngineAdapter is null");
             Debug.Assert(NUnitEngineAdapter.EngineEnabled, "NUnitEngineAdapter TestEngine is null");
             var assemblyGroups = tests.GroupBy(tc => tc.Source);
-            if (Settings.InProcDataCollectorsAvailable && assemblyGroups.Count() > 1)
+            if (IsInProcDataCollectorsSpecifiedWithMultipleAssemblies(assemblyGroups))
             {
                 TestLog.Error("Failed to run tests for multiple assemblies when InProcDataCollectors specified in run configuration.");
                 Unload();
@@ -149,6 +180,7 @@ namespace NUnit.VisualStudio.TestAdapter
 
             foreach (var assemblyGroup in assemblyGroups)
             {
+                var assemblytiming = new TimingLogger(Settings, TestLog);
                 try
                 {
                     string assemblyName = assemblyGroup.Key;
@@ -164,11 +196,17 @@ namespace NUnit.VisualStudio.TestAdapter
                     if (ex is TargetInvocationException) { ex = ex.InnerException; }
                     TestLog.Warning("Exception thrown executing tests", ex);
                 }
+
+                assemblytiming.LogTime($"Executing {assemblyGroup.Key} time ");
             }
 
+            timing.LogTime("Total execution time");
             TestLog.Info($"NUnit Adapter {AdapterVersion}: Test execution complete");
             Unload();
         }
+
+        private bool IsInProcDataCollectorsSpecifiedWithMultipleAssemblies(IEnumerable<IGrouping<string, TestCase>> assemblyGroups)
+            => Settings.InProcDataCollectorsAvailable && assemblyGroups.Count() > 1;
 
         void ITestExecutor.Cancel()
         {
@@ -194,9 +232,8 @@ namespace NUnit.VisualStudio.TestAdapter
 
             RunContext = runContext;
             FrameworkHandle = frameworkHandle;
-            TfsFilter = new TfsTestFilter(runContext);
+            VsTestFilter = VsTestFilterFactory.CreateVsTestFilter(Settings, runContext);
 
-            // Ensure any channels registered by other adapters are unregistered
             CleanUpRegisteredChannels();
 
             TestLog.Debug("KeepAlive: " + runContext.KeepAlive);
@@ -208,7 +245,7 @@ namespace NUnit.VisualStudio.TestAdapter
                 enableShutdown = !runContext.KeepAlive;
             }
 
-            if (TfsFilter.IsEmpty)
+            if (VsTestFilter.IsEmpty)
             {
                 if (!(enableShutdown && !runContext.KeepAlive))  // Otherwise causes exception when run as commandline, illegal to enableshutdown when Keepalive is false, might be only VS2012
                     frameworkHandle.EnableShutdownAfterTestRun = enableShutdown;
@@ -219,79 +256,29 @@ namespace NUnit.VisualStudio.TestAdapter
 
         private void RunAssembly(string assemblyPath, IGrouping<string, TestCase> testCases, TestFilter filter)
         {
-#if LAUNCHDEBUGGER
-            if (!Debugger.IsAttached)
-                Debugger.Launch();
-#endif
-
             string actionText = Debugger.IsAttached ? "Debugging " : "Running ";
             string selectionText = filter == null || filter == TestFilter.Empty ? "all" : "selected";
             TestLog.Info(actionText + selectionText + " tests in " + assemblyPath);
-
-            // No need to restore if the seed was in runsettings file
-            if (!Settings.RandomSeedSpecified)
-                Settings.RestoreRandomSeed(Path.GetDirectoryName(assemblyPath));
-            executionDumpXml = null;
-            if (Settings.DumpXmlTestResults)
-            {
-                executionDumpXml = new DumpXml(assemblyPath);
-            }
+            RestoreRandomSeed(assemblyPath);
+            Dump = DumpXml.CreateDump(assemblyPath, testCases, Settings);
 
             try
             {
                 var package = CreateTestPackage(assemblyPath, testCases);
                 NUnitEngineAdapter.CreateRunner(package);
                 CreateTestOutputFolder();
-                executionDumpXml?.AddString($"<NUnitDiscoveryInExecution>{assemblyPath}</NUnitExecution>\r\n\r\n");
-                var discoveryResults = NUnitEngineAdapter.Explore(filter); // _activeRunner.Explore(filter);
-                executionDumpXml?.AddString(discoveryResults.AsString());
+                Dump?.StartDiscoveryInExecution(testCases, filter, package);
 
-                if (discoveryResults.IsRunnable)
+                // var discoveryResults = RunType == RunType.CommandLineCurrentNUnit ? null : NUnitEngineAdapter.Explore(filter);
+                var discoveryResults = NUnitEngineAdapter.Explore(filter);
+                Dump?.AddString(discoveryResults?.AsString() ?? " No discovery");
+
+                if (discoveryResults?.IsRunnable ?? true)
                 {
-                    var nunitTestCases = discoveryResults.TestCases();
-
-                    using (var testConverter = new TestConverter(TestLog, assemblyPath, Settings))
-                    {
-                        var loadedTestCases = new List<TestCase>();
-
-                        // As a side effect of calling TestConverter.ConvertTestCase,
-                        // the converter's cache of all test cases is populated as well.
-                        // All future calls to convert a test case may now use the cache.
-                        foreach (XmlNode testNode in nunitTestCases)
-                            loadedTestCases.Add(testConverter.ConvertTestCase(new NUnitTestCase(testNode)));
-
-
-                        TestLog.Info($"   NUnit3TestExecutor converted {loadedTestCases.Count} of {nunitTestCases.Count} NUnit test cases");
-
-
-                        // If we have a TFS Filter, convert it to an nunit filter
-                        if (TfsFilter != null && !TfsFilter.IsEmpty)
-                        {
-                            // NOTE This overwrites filter used in call
-                            var filterBuilder = CreateTestFilterBuilder();
-                            filter = filterBuilder.ConvertTfsFilterToNUnitFilter(TfsFilter, loadedTestCases);
-                        }
-
-                        if (filter == NUnitTestFilterBuilder.NoTestsFound)
-                        {
-                            TestLog.Info("   Skipping assembly - no matching test cases found");
-                            return;
-                        }
-                        executionDumpXml?.AddString($"<NUnitExecution>{assemblyPath}</NUnitExecution>\r\n");
-                        using (var listener = new NUnitEventListener(FrameworkHandle, testConverter, this))
-                        {
-                            try
-                            {
-                                var results = NUnitEngineAdapter.Run(listener, filter);
-                                GenerateTestOutput(results.TopNode, assemblyPath);
-                            }
-                            catch (NullReferenceException)
-                            {
-                                // this happens during the run when CancelRun is called.
-                                TestLog.Debug("   Null ref caught");
-                            }
-                        }
-                    }
+                    var discovery = new DiscoveryConverter(TestLog, Settings);
+                    discovery.Convert(discoveryResults, assemblyPath);
+                    var ea = ExecutionFactory.Create(this);
+                    ea.Run(filter, discovery, this);
                 }
                 else
                 {
@@ -300,19 +287,10 @@ namespace NUnit.VisualStudio.TestAdapter
                             : "   NUnit failed to load " + assemblyPath);
                 }
             }
-            catch (BadImageFormatException)
+            catch (Exception ex) when (ex is BadImageFormatException || ex.InnerException is BadImageFormatException)
             {
                 // we skip the native c++ binaries that we don't support.
                 TestLog.Warning("   Assembly not supported: " + assemblyPath);
-            }
-            catch (NUnitEngineException e)
-            {
-                if (e.InnerException is BadImageFormatException)
-                {
-                    // we skip the native c++ binaries that we don't support.
-                    TestLog.Warning("   Assembly not supported: " + assemblyPath);
-                }
-                throw;
             }
             catch (FileNotFoundException ex)
             {
@@ -327,7 +305,7 @@ namespace NUnit.VisualStudio.TestAdapter
             }
             finally
             {
-                executionDumpXml?.Dump4Execution();
+                Dump?.DumpForExecution();
                 try
                 {
                     NUnitEngineAdapter?.CloseRunner();
@@ -343,25 +321,22 @@ namespace NUnit.VisualStudio.TestAdapter
         }
 
 
-        private void GenerateTestOutput(XmlNode testResults, string assemblyPath)
+
+
+        private void RestoreRandomSeed(string assemblyPath)
         {
-            if (!Settings.UseTestOutputXml)
-                return;
-
-            string path = Path.Combine(TestOutputXmlFolder, $"{Path.GetFileNameWithoutExtension(assemblyPath)}.xml");
-            var resultService = NUnitEngineAdapter.GetService<IResultService>();
-
-            // Following null argument should work for nunit3 format. Empty array is OK as well.
-            // If you decide to handle other formats in the runsettings, it needs more work.
-            var resultWriter = resultService.GetResultWriter("nunit3", null);
-            resultWriter.WriteResultFile(testResults, path);
-            TestLog.Info($"   Test results written to {path}");
+            // No need to restore if the seed was in runsettings file
+            if (!Settings.RandomSeedSpecified)
+                Settings.RestoreRandomSeed(Path.GetDirectoryName(assemblyPath));
         }
+
 
         private NUnitTestFilterBuilder CreateTestFilterBuilder()
         {
-            return new NUnitTestFilterBuilder(NUnitEngineAdapter.GetService<ITestFilterService>());
+            return new NUnitTestFilterBuilder(NUnitEngineAdapter.GetService<ITestFilterService>(), Settings);
         }
+
+
 
 
         private void CreateTestOutputFolder()
@@ -394,6 +369,6 @@ namespace NUnit.VisualStudio.TestAdapter
             NUnitEngineAdapter?.StopRun();
         }
 
-        public IDumpXml Dump => executionDumpXml;
+        public IDumpXml Dump { get; private set; }
     }
 }

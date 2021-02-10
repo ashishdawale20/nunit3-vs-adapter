@@ -7,6 +7,7 @@ using NSubstitute;
 using NUnit.Framework;
 using NUnit.VisualStudio.TestAdapter.NUnitEngine;
 using NUnit.VisualStudio.TestAdapter.Tests.Fakes;
+// ReSharper disable StringLiteralTypo
 
 namespace NUnit.VisualStudio.TestAdapter.Tests
 {
@@ -52,7 +53,7 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
         /// {
         ///    [Category("Derived")]
         ///    [Test]
-        ///    public void dNunitTest()
+        ///    public void dNUnitTest()
         ///    { }
         /// }.
         /// </summary>
@@ -78,7 +79,7 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
 					<property name='Category' value='DerivedClass' />
 					<property name='Category' value='BaseClass' />
 				</properties>
-				<test-case id='0-1003' name='dNunitTest' fullname='nUnitClassLibrary.ClassD.dNunitTest' methodname='dNunitTest' classname='nUnitClassLibrary.ClassD' runstate='Runnable' seed='405714082'>
+				<test-case id='0-1003' name='dNUnitTest' fullname='nUnitClassLibrary.ClassD.dNUnitTest' methodname='dNUnitTest' classname='nUnitClassLibrary.ClassD' runstate='Runnable' seed='405714082'>
 					<properties>
 						<property name='Category' value='Derived' />
 					</properties>
@@ -158,7 +159,7 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
         ///    }
         /// }.
         /// </summary>
-        const string TestXmlParametrizedData =
+        const string TestXmlParameterizedData =
             @"<test-suite type='Assembly' id='4-1004' name='ClassLibrary11.dll' fullname='C:\Users\Terje\documents\visual studio 2017\Projects\ClassLibrary11\ClassLibrary11\bin\Debug\ClassLibrary11.dll' runstate='Runnable' testcasecount='2'>
 	<properties>
 		<property name='_PID' value='10904' />
@@ -356,7 +357,7 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
 
         public XmlNode XmlForNestedClasses => XmlHelper.CreateXmlNode(XmlNestedClasses);
         public XmlNode XmlForHierarchyOfClasses => XmlHelper.CreateXmlNode(XmlHierarchyOfClasses);
-        public XmlNode XmlForParametrizedTests => XmlHelper.CreateXmlNode(TestXmlParametrizedData);
+        public XmlNode XmlForParameterizedTests => XmlHelper.CreateXmlNode(TestXmlParameterizedData);
         public XmlNode XmlForStandardTest => XmlHelper.CreateXmlNode(TestXmlStandardClass);
 
         public XmlNode XmlForTestCaseWithCategory => XmlHelper.CreateXmlNode(TestCaseWithCategory);
@@ -368,7 +369,7 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
     [Category(nameof(TestTraits))]
     public class TestTraits
     {
-        private TestConverter testconverter;
+        private TestConverterForXml testconverter;
         private List<TestCase> testcaselist;
         private TestDataForTraits testDataForTraits;
 
@@ -384,7 +385,7 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
             testlogger.InitSettings(adaptersettings);
             var settings = Substitute.For<IAdapterSettings>();
             settings.CollectSourceInformation.Returns(false);
-            testconverter = new TestConverter(testlogger, "whatever", settings);
+            testconverter = new TestConverterForXml(testlogger, "whatever", settings);
             testcaselist = new List<TestCase>();
         }
 
@@ -395,9 +396,9 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
         }
 
         [Test]
-        public void ThatParametrizedTestsHaveTraits()
+        public void ThatParameterizedTestsHaveTraits()
         {
-            var xml = testDataForTraits.XmlForParametrizedTests;
+            var xml = testDataForTraits.XmlForParameterizedTests;
 
             ProcessXml2TestCase(xml);
 
@@ -419,7 +420,7 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
             ProcessXml2TestCase(xml);
 
             Assert.That(testcaselist.Count, Is.EqualTo(3), "Wrong number of testcases found");
-            var testcase1 = testcaselist.FirstOrDefault(o => o.DisplayName == "dNunitTest");
+            var testcase1 = testcaselist.FirstOrDefault(o => o.DisplayName == "dNUnitTest");
             Assert.That(testcase1, Is.Not.Null, "Didn't find the  testcase");
             VerifyCategoriesOnly(testcase1, 3, "derived");
        }
@@ -486,7 +487,7 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
         {
             foreach (XmlNode node in xml.SelectNodes("//test-case"))
             {
-                var testcase = testconverter.ConvertTestCase(new NUnitTestCase(node));
+                var testcase = testconverter.ConvertTestCase(new NUnitEventTestCase(node));
                 testcaselist.Add(testcase);
             }
         }
@@ -516,7 +517,7 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
             Assert.That(testcaselist.Count, Is.EqualTo(3), "Wrong number of testcases found");
             var testcasesWithCategories = testcaselist.Where(o => o.GetCategories()?.FirstOrDefault() != null).ToList();
             Assert.That(testcasesWithCategories, Is.Not.Null, "Didn't find the  testcases");
-            Assert.That(testcasesWithCategories.Count(), Is.EqualTo(1), "Wrong number of testcases with categories, should be only 1");
+            Assert.That(testcasesWithCategories.Count, Is.EqualTo(1), "Wrong number of testcases with categories, should be only 1");
             var tc = testcasesWithCategories.FirstOrDefault();
             VerifyCategoriesOnly(tc, 1, "simple");
             Assert.That(tc.GetCategories().First(), Is.EqualTo("Single"));
@@ -537,13 +538,11 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
         {
             var settings = Substitute.For<IAdapterSettings>();
             settings.CollectSourceInformation.Returns(false);
-            using (var converter = new TestConverter(
+            using var converter = new TestConverterForXml(
                 new TestLogger(new MessageLoggerStub()),
-                sourceAssembly: "unused",
-                settings))
-            {
-                return converter.ConvertTestCases(xml);
-            }
+                "unused",
+                settings);
+            return converter.ConvertTestCases(xml);
         }
 
         [Test]

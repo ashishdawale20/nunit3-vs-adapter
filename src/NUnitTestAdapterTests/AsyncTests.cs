@@ -22,7 +22,6 @@
 // ***********************************************************************
 using System;
 using System.Threading.Tasks;
-using Microsoft.VisualStudio.TestPlatform.ObjectModel;
 using NUnit.Framework;
 
 namespace NUnit.VisualStudio.TestAdapter.Tests
@@ -34,7 +33,7 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
         {
             var result = await ReturnOne();
 
-            Assert.AreEqual(1, result);
+            Assert.That(result, Is.EqualTo(1));
         }
 
         [TestCase(ExpectedResult = 1)]

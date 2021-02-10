@@ -23,9 +23,8 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
+using System.Linq;
 using System.Text.RegularExpressions;
-using System.Xml;
 using Microsoft.VisualStudio.TestPlatform.ObjectModel;
 using Microsoft.VisualStudio.TestPlatform.ObjectModel.Utilities;
 using NUnit.VisualStudio.TestAdapter.NUnitEngine;
@@ -33,12 +32,6 @@ using VSTestResult = Microsoft.VisualStudio.TestPlatform.ObjectModel.TestResult;
 
 namespace NUnit.VisualStudio.TestAdapter
 {
-    public interface ITestConverter
-    {
-        TestCase GetCachedTestCase(string id);
-        TestConverter.TestResultSet GetVsTestResults(NUnitTestEventTestCase resultNode, ICollection<XmlNode> outputNodes);
-    }
-
     public sealed class TestConverter : IDisposable, ITestConverter
     {
         private readonly ITestLogger _logger;
@@ -47,10 +40,12 @@ namespace NUnit.VisualStudio.TestAdapter
         private readonly NavigationDataProvider _navigationDataProvider;
         private bool CollectSourceInformation => adapterSettings.CollectSourceInformation;
         private readonly IAdapterSettings adapterSettings;
+        private static readonly string NL = Environment.NewLine;
+        private readonly IDiscoveryConverter discoveryConverter;
 
-
-        public TestConverter(ITestLogger logger, string sourceAssembly, IAdapterSettings settings)
+        public TestConverter(ITestLogger logger, string sourceAssembly, IAdapterSettings settings, IDiscoveryConverter discoveryConverter)
         {
+            this.discoveryConverter = discoveryConverter;
             adapterSettings = settings;
             _logger = logger;
             _sourceAssembly = sourceAssembly;
@@ -77,18 +72,15 @@ namespace NUnit.VisualStudio.TestAdapter
         /// using the best method available according to the exact
         /// type passed and caching results for efficiency.
         /// </summary>
-        public TestCase ConvertTestCase(NUnitTestCase testNode)
+        public TestCase ConvertTestCase(NUnitDiscoveryTestCase testNode)
         {
-            if (!testNode.IsTestCase)
-                throw new ArgumentException("The argument must be a test case", nameof(testNode));
-
             // Return cached value if we have one
             string id = testNode.Id;
             if (_vsTestCaseMap.ContainsKey(id))
                 return _vsTestCaseMap[id];
 
             // Convert to VS TestCase and cache the result
-            var testCase = MakeTestCaseFromXmlNode(testNode);
+            var testCase = MakeTestCaseFromDiscoveryNode(testNode);
             _vsTestCaseMap.Add(id, testCase);
             return testCase;
         }
@@ -102,9 +94,7 @@ namespace NUnit.VisualStudio.TestAdapter
             return null;
         }
 
-        private static readonly string NL = Environment.NewLine;
-
-        public TestResultSet GetVsTestResults(NUnitTestEventTestCase resultNode, ICollection<XmlNode> outputNodes)
+        public TestConverterForXml.TestResultSet GetVsTestResults(INUnitTestEventTestCase resultNode, ICollection<INUnitTestEventTestOutput> outputNodes)
         {
             var results = new List<VSTestResult>();
 
@@ -112,25 +102,26 @@ namespace NUnit.VisualStudio.TestAdapter
 
             if (testCaseResult != null)
             {
-                if (testCaseResult.Outcome == TestOutcome.Failed || testCaseResult.Outcome == TestOutcome.NotFound)
+                switch (testCaseResult.Outcome)
                 {
-                    testCaseResult.ErrorMessage = resultNode.Failure?.Message;
-                    testCaseResult.ErrorStackTrace = resultNode.Failure?.Stacktrace;
-
-                    // find stacktrace in assertion nodes if not defined (seems .netcore2.0 doesn't provide stack-trace for Assert.Fail("abc"))
-                    if (testCaseResult.ErrorStackTrace == null)
-                    {
-                        string stackTrace = string.Empty;
-                        foreach (XmlNode assertionStacktraceNode in resultNode.Node.SelectNodes("assertions/assertion/stack-trace"))
+                    case TestOutcome.Failed:
+                    case TestOutcome.NotFound:
                         {
-                            stackTrace += assertionStacktraceNode.InnerText;
+                            testCaseResult.ErrorMessage = resultNode.Failure?.Message;
+                            testCaseResult.ErrorStackTrace = resultNode.Failure?.Stacktrace ?? resultNode.StackTrace;
+                            break;
                         }
-                        testCaseResult.ErrorStackTrace = stackTrace;
-                    }
-                }
-                else if (testCaseResult.Outcome == TestOutcome.Skipped || testCaseResult.Outcome == TestOutcome.None)
-                {
-                    testCaseResult.ErrorMessage = resultNode.ReasonMessage;
+                    case TestOutcome.Skipped:
+                    case TestOutcome.None:
+                        testCaseResult.ErrorMessage = resultNode.ReasonMessage;
+                        testCaseResult.Messages.Add(new TestResultMessage(TestResultMessage.StandardOutCategory, resultNode.ReasonMessage));
+                        break;
+                    default:
+                        {
+                            if (adapterSettings.ConsoleOut > 0 && !string.IsNullOrEmpty(resultNode.ReasonMessage))
+                                testCaseResult.Messages.Add(new TestResultMessage(TestResultMessage.StandardOutCategory, resultNode.ReasonMessage));
+                            break;
+                        }
                 }
 
                 results.Add(testCaseResult);
@@ -142,15 +133,7 @@ namespace NUnit.VisualStudio.TestAdapter
                 if (result != null)
                     results.Add(result);
             }
-            return new TestResultSet { TestCaseResult = testCaseResult, TestResults = results, ConsoleOutput = resultNode.Output };
-        }
-
-        public struct TestResultSet
-        {
-            public IList<VSTestResult> TestResults { get; set; }
-            public TestResult TestCaseResult { get; set; }
-
-            public string ConsoleOutput { get; set; }
+            return new TestConverterForXml.TestResultSet { TestCaseResult = testCaseResult, TestResults = results, ConsoleOutput = resultNode.Output };
         }
 
         #endregion
@@ -161,13 +144,13 @@ namespace NUnit.VisualStudio.TestAdapter
         /// Makes a TestCase from an NUnit test, adding
         /// navigation data if it can be found.
         /// </summary>
-        private TestCase MakeTestCaseFromXmlNode(NUnitTestCase testNode)
+        private TestCase MakeTestCaseFromDiscoveryNode(NUnitDiscoveryTestCase testNode)
         {
             string fullyQualifiedName = testNode.FullName;
             if (adapterSettings.UseParentFQNForParametrizedTests)
             {
-                var parent = testNode.Parent();
-                if (parent.IsParameterizedMethod)
+                var parent = testNode.Parent;
+                if (parent != null && parent.IsParameterizedMethod)
                 {
                     var parameterizedTestFullName = parent.FullName;
 
@@ -200,34 +183,61 @@ namespace NUnit.VisualStudio.TestAdapter
                                     new Uri(NUnitTestAdapter.ExecutorUri),
                                     _sourceAssembly)
             {
-                DisplayName = testNode.Name,
+                DisplayName = CreateDisplayName(fullyQualifiedName, testNode.Name),
                 CodeFilePath = null,
-                LineNumber = 0,
+                LineNumber = 0
             };
             if (adapterSettings.UseNUnitIdforTestCaseId)
             {
-                var id = testNode.Id;
-                testCase.Id = EqtHash.GuidFromString(id);
+                testCase.Id = EqtHash.GuidFromString(testNode.Id);
             }
             if (CollectSourceInformation && _navigationDataProvider != null)
             {
-                var className = testNode.ClassName;
-                var methodName = testNode.MethodName;
-
-                var navData = _navigationDataProvider.GetNavigationData(className, methodName);
-                if (navData.IsValid)
+                if (!CheckCodeFilePathOverride())
                 {
-                    testCase.CodeFilePath = navData.FilePath;
-                    testCase.LineNumber = navData.LineNumber;
+                    var navData = _navigationDataProvider.GetNavigationData(testNode.ClassName, testNode.MethodName);
+                    if (navData.IsValid)
+                    {
+                        testCase.CodeFilePath = navData.FilePath;
+                        testCase.LineNumber = navData.LineNumber;
+                    }
                 }
+            }
+            else
+            {
+                _ = CheckCodeFilePathOverride();
             }
 
             testCase.AddTraitsFromTestNode(testNode, TraitsCache, _logger, adapterSettings);
 
             return testCase;
+
+            bool CheckCodeFilePathOverride()
+            {
+                var codeFilePath = testNode.Properties.FirstOrDefault(p => p.Name == "_CodeFilePath");
+                if (codeFilePath == null)
+                    return false;
+                testCase.CodeFilePath = codeFilePath.Value;
+                var lineNumber = testNode.Properties.FirstOrDefault(p => p.Name == "_LineNumber");
+                testCase.LineNumber = lineNumber != null ? Convert.ToInt32(lineNumber.Value) : 1;
+                return true;
+            }
         }
 
-        private VSTestResult MakeTestResultFromLegacyXmlNode(NUnitTestEventTestCase resultNode, IEnumerable<XmlNode> outputNodes)
+        private string CreateDisplayName(string fullyQualifiedName, string testNodeName)
+        {
+            if (adapterSettings.FreakMode)
+                return "N:Name -> MS:DisplayName (default)";
+            return adapterSettings.DisplayName switch
+            {
+                DisplayNameOptions.Name => testNodeName,
+                DisplayNameOptions.FullName => fullyQualifiedName,
+                DisplayNameOptions.FullNameSep => fullyQualifiedName.Replace('.', adapterSettings.FullnameSeparator),
+                _ => throw new ArgumentOutOfRangeException(),
+            };
+        }
+
+        private VSTestResult MakeTestResultFromLegacyXmlNode(INUnitTestEventTestCase resultNode, IEnumerable<INUnitTestEventTestOutput> outputNodes)
         {
             var ourResult = GetBasicResult(resultNode, outputNodes);
             if (ourResult == null)
@@ -253,11 +263,21 @@ namespace NUnit.VisualStudio.TestAdapter
             return ourResult;
         }
 
-        private VSTestResult GetBasicResult(NUnitTestEvent resultNode, IEnumerable<XmlNode> outputNodes)
+        private VSTestResult GetBasicResult(INUnitTestEvent resultNode, IEnumerable<INUnitTestEventTestOutput> outputNodes)
         {
             var vsTest = GetCachedTestCase(resultNode.Id);
             if (vsTest == null)
-                return null;
+            {
+                var discoveredTest = discoveryConverter.AllTestCases.FirstOrDefault(o => o.Id == resultNode.Id);
+                if (discoveredTest != null)
+                {
+                    vsTest = ConvertTestCase(discoveredTest);
+                }
+                else
+                {
+                    return null;
+                }
+            }
 
             var vsResult = new VSTestResult(vsTest)
             {
@@ -287,33 +307,28 @@ namespace NUnit.VisualStudio.TestAdapter
             if (!string.IsNullOrEmpty(output))
                 vsResult.Messages.Add(new TestResultMessage(TestResultMessage.StandardOutCategory, output));
 
-            var attachmentSet = ParseAttachments(resultNode.Node);
+            var attachmentSet = ParseAttachments(resultNode);
             if (attachmentSet.Attachments.Count > 0)
                 vsResult.Attachments.Add(attachmentSet);
 
             return vsResult;
         }
 
-        private static void FillResultFromOutputNodes(IEnumerable<XmlNode> outputNodes, VSTestResult vsResult)
+        private static void FillResultFromOutputNodes(IEnumerable<INUnitTestEventTestOutput> outputNodes, VSTestResult vsResult)
         {
             foreach (var output in outputNodes)
             {
-                var stream = output.GetAttribute("stream");
-                if (string.IsNullOrEmpty(stream) || IsProgressStream(stream))  // Don't add progress streams as output
+                if (output.IsNullOrEmptyStream || output.IsProgressStream)  // Don't add progress streams as output
                 {
                     continue;
                 }
 
                 // Add stdErr/Progress messages from TestOutputXml element to vstest result
                 vsResult.Messages.Add(new TestResultMessage(
-                    IsErrorStream(stream)
+                    output.IsErrorStream
                         ? TestResultMessage.StandardErrorCategory
-                        : TestResultMessage.StandardOutCategory, output.InnerText));
+                        : TestResultMessage.StandardOutCategory, output.Content));
             }
-
-            bool IsErrorStream(string stream) => "error".Equals(stream, StringComparison.OrdinalIgnoreCase);
-
-            bool IsProgressStream(string stream) => "progress".Equals(stream, StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>
@@ -322,15 +337,15 @@ namespace NUnit.VisualStudio.TestAdapter
         /// </summary>
         /// <param name="resultNode">xml node for test result.</param>
         /// <returns>attachments to be added to the test, it will be empty if no attachments are found.</returns>
-        private AttachmentSet ParseAttachments(XmlNode resultNode)
+        private AttachmentSet ParseAttachments(INUnitTestEvent resultNode)
         {
             const string fileUriScheme = "file://";
             var attachmentSet = new AttachmentSet(new Uri(NUnitTestAdapter.ExecutorUri), "Attachments");
 
-            foreach (XmlNode attachment in resultNode.SelectNodes("attachments/attachment"))
+            foreach (var attachment in resultNode.NUnitAttachments)
             {
-                var path = attachment.SelectSingleNode("filePath")?.InnerText ?? string.Empty;
-                var description = attachment.SelectSingleNode("description")?.InnerText;
+                var path = attachment.FilePath;
+                var description = attachment.Description;
 
                 if (!(string.IsNullOrEmpty(path) || path.StartsWith(fileUriScheme, StringComparison.OrdinalIgnoreCase)))
                 {
@@ -358,40 +373,17 @@ namespace NUnit.VisualStudio.TestAdapter
         }
 
         // Public for testing
-        public static TestOutcome GetTestOutcome(NUnitTestEvent resultNode)
+        public TestOutcome GetTestOutcome(INUnitTestEvent resultNode)
         {
-            switch (resultNode.Result())
+            return resultNode.Result() switch
             {
-                case NUnitTestEvent.ResultType.Success:
-                    return TestOutcome.Passed;
-                case NUnitTestEvent.ResultType.Failed:
-                    return TestOutcome.Failed;
-                case NUnitTestEvent.ResultType.Skipped:
-                    return resultNode.IsIgnored ? TestOutcome.Skipped : TestOutcome.None;
-                case NUnitTestEvent.ResultType.Warning:
-                    return TestOutcome.Skipped;
-                default:
-                    return TestOutcome.None;
-            }
+                NUnitTestEvent.ResultType.Success => TestOutcome.Passed,
+                NUnitTestEvent.ResultType.Failed => TestOutcome.Failed,
+                NUnitTestEvent.ResultType.Skipped => (resultNode.IsIgnored ? TestOutcome.Skipped : TestOutcome.None),
+                NUnitTestEvent.ResultType.Warning => adapterSettings.MapWarningTo,
+                _ => TestOutcome.None
+            };
         }
-
-        TestOutcome GetAssertionOutcome(XmlNode assertion)
-        {
-            switch (assertion.GetAttribute("result"))
-            {
-                case "Passed":
-                    return TestOutcome.Passed;
-                case "Failed":
-                case "Error":
-                    return TestOutcome.Failed;
-                case "Warning":
-                    return TestOutcome.Skipped;
-                case "Inconclusive":
-                default:
-                    return TestOutcome.None;
-            }
-        }
-
         #endregion
     }
 }

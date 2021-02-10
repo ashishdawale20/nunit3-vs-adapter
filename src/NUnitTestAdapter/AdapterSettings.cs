@@ -25,7 +25,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Xml;
-
+using Microsoft.VisualStudio.TestPlatform.ObjectModel;
 using Microsoft.VisualStudio.TestPlatform.ObjectModel.Adapter;
 
 namespace NUnit.VisualStudio.TestAdapter
@@ -59,6 +59,8 @@ namespace NUnit.VisualStudio.TestAdapter
         bool DumpXmlTestDiscovery { get; }
         bool DumpXmlTestResults { get; }
 
+        bool DumpVsInput { get; }
+
         bool PreFilter { get; }
 
         /// <summary>
@@ -69,6 +71,11 @@ namespace NUnit.VisualStudio.TestAdapter
         VsTestCategoryType VsTestCategoryType { get; }
         string TestOutputXml { get; }
         bool UseTestOutputXml { get; }
+
+        /// <summary>
+        /// For retry runs create a new file for each run.
+        /// </summary>
+        bool NewOutputXmlFileForEachRun { get; }
 
         /// <summary>
         /// True if test run is triggered in an IDE/Editor context.
@@ -89,10 +96,22 @@ namespace NUnit.VisualStudio.TestAdapter
 
         bool UseParentFQNForParametrizedTests { get; }
 
-        bool UseNUnitIdforTestCaseId { get;  }
+        bool UseNUnitIdforTestCaseId { get; }
 
         int ConsoleOut { get; }
         bool StopOnError { get; }
+        TestOutcome MapWarningTo { get; }
+        bool UseTestNameInConsoleOutput { get; }
+        bool FreakMode { get; }
+        DisplayNameOptions DisplayName { get; }
+        char FullnameSeparator { get; }
+        DiscoveryMethod DiscoveryMethod { get; }
+        bool SkipNonTestAssemblies { get; }
+
+        int AssemblySelectLimit { get; }
+
+        bool UseNUnitFilter { get; }
+
 
         void Load(IDiscoveryContext context);
         void Load(string settingsXml);
@@ -106,15 +125,27 @@ namespace NUnit.VisualStudio.TestAdapter
         MsTest
     }
 
+    public enum DisplayNameOptions
+    {
+        Name,
+        FullName,
+        FullNameSep
+    }
+
+    public enum DiscoveryMethod
+    {
+        Legacy,
+        Current
+    }
 
     public class AdapterSettings : IAdapterSettings
     {
         private const string RANDOM_SEED_FILE = "nunit_random_seed.tmp";
-        private readonly TestLogger _logger;
+        private readonly ITestLogger _logger;
 
         #region Constructor
 
-        public AdapterSettings(TestLogger logger)
+        public AdapterSettings(ITestLogger logger)
         {
             _logger = logger;
         }
@@ -169,6 +200,7 @@ namespace NUnit.VisualStudio.TestAdapter
         public string Where { get; private set; }
         public string TestOutputXml { get; private set; }
         public bool UseTestOutputXml => !string.IsNullOrEmpty(TestOutputXml);
+        public bool NewOutputXmlFileForEachRun { get; private set; }
         public int DefaultTimeout { get; private set; }
 
         public int NumberOfTestWorkers { get; private set; }
@@ -200,12 +232,12 @@ namespace NUnit.VisualStudio.TestAdapter
         public int ConsoleOut { get; private set; }
         public bool StopOnError { get; private set; }
 
+        public DiscoveryMethod DiscoveryMethod { get; private set; } = DiscoveryMethod.Current;
+        public bool SkipNonTestAssemblies { get; private set; }
+        public int AssemblySelectLimit { get; private set; }
+        public bool UseNUnitFilter { get; private set; }
 
         public VsTestCategoryType VsTestCategoryType { get; private set; } = VsTestCategoryType.NUnit;
-
-        public bool DumpXmlTestDiscovery { get; private set; }
-
-        public bool DumpXmlTestResults { get; private set; }
 
         /// <summary>
         ///  Syntax documentation <see cref="https://github.com/nunit/docs/wiki/Template-Based-Test-Naming"/>.
@@ -213,6 +245,28 @@ namespace NUnit.VisualStudio.TestAdapter
         public string DefaultTestNamePattern { get; set; }
 
         public bool PreFilter { get; private set; }
+
+        public TestOutcome MapWarningTo { get; private set; }
+
+        public bool UseTestNameInConsoleOutput { get; private set; }
+
+        public DisplayNameOptions DisplayName { get; private set; } = DisplayNameOptions.Name;
+
+        public char FullnameSeparator { get; private set; } = ':';
+
+
+
+
+        #region  NUnit Diagnostic properties
+        public bool DumpXmlTestDiscovery { get; private set; }
+
+        public bool DumpXmlTestResults { get; private set; }
+
+        public bool DumpVsInput { get; private set; }
+
+        public bool FreakMode { get; private set; }
+
+        #endregion
 
 
 
@@ -256,13 +310,7 @@ namespace NUnit.VisualStudio.TestAdapter
                 GetInnerTextAsBool(runConfiguration, nameof(CollectDataForEachTestSeparately), false);
 
             TestProperties = new Dictionary<string, string>();
-            foreach (XmlNode node in doc.SelectNodes("RunSettings/TestRunParameters/Parameter"))
-            {
-                var key = node.GetAttribute("name");
-                var value = node.GetAttribute("value");
-                if (key != null && value != null)
-                    TestProperties.Add(key, value);
-            }
+            UpdateTestProperties();
 
             // NUnit settings
             InternalTraceLevel = GetInnerTextWithLog(nunitNode, nameof(InternalTraceLevel), "Off", "Error", "Warning",
@@ -276,6 +324,7 @@ namespace NUnit.VisualStudio.TestAdapter
             BasePath = GetInnerTextWithLog(nunitNode, nameof(BasePath));
             PrivateBinPath = GetInnerTextWithLog(nunitNode, nameof(PrivateBinPath));
             TestOutputXml = GetInnerTextWithLog(nunitNode, nameof(TestOutputXml));
+            NewOutputXmlFileForEachRun = GetInnerTextAsBool(nunitNode, nameof(NewOutputXmlFileForEachRun), false);
             RandomSeed = GetInnerTextAsNullableInt(nunitNode, nameof(RandomSeed));
             RandomSeedSpecified = RandomSeed.HasValue;
             if (!RandomSeedSpecified)
@@ -286,27 +335,34 @@ namespace NUnit.VisualStudio.TestAdapter
             UseNUnitIdforTestCaseId = GetInnerTextAsBool(nunitNode, nameof(UseNUnitIdforTestCaseId), false);
             ConsoleOut = GetInnerTextAsInt(nunitNode, nameof(ConsoleOut), 1);  // 0 no output to console, 1 : output to console
             StopOnError = GetInnerTextAsBool(nunitNode, nameof(StopOnError), false);
+            DiscoveryMethod = MapEnum(GetInnerText(nunitNode, nameof(DiscoveryMethod), Verbosity > 0), DiscoveryMethod.Current);
+            UseNUnitFilter = GetInnerTextAsBool(nunitNode, nameof(UseNUnitFilter), true);
+
+
+            // Engine settings
+            SkipNonTestAssemblies = GetInnerTextAsBool(nunitNode, nameof(SkipNonTestAssemblies), true);
+            AssemblySelectLimit = GetInnerTextAsInt(nunitNode, nameof(AssemblySelectLimit), 2000);
+
+
+            // Adapter Diagnostics
             DumpXmlTestDiscovery = GetInnerTextAsBool(nunitNode, nameof(DumpXmlTestDiscovery), false);
             DumpXmlTestResults = GetInnerTextAsBool(nunitNode, nameof(DumpXmlTestResults), false);
-            PreFilter = GetInnerTextAsBool(nunitNode, nameof(PreFilter), false);
-            var vsTestCategoryType = GetInnerText(nunitNode, nameof(VsTestCategoryType), Verbosity > 0);
-            if (vsTestCategoryType != null)
-            {
-                switch (vsTestCategoryType.ToLower())
-                {
-                    case "nunit":
-                        VsTestCategoryType = VsTestCategoryType.NUnit;
-                        break;
-                    case "mstest":
-                        VsTestCategoryType = VsTestCategoryType.MsTest;
-                        break;
-                    default:
-                        _logger.Warning(
-                            $"Invalid value ({vsTestCategoryType}) for VsTestCategoryType, should be either NUnit or MsTest");
-                        break;
-                }
-            }
+            DumpVsInput = GetInnerTextAsBool(nunitNode, nameof(DumpVsInput), false);
+            FreakMode = GetInnerTextAsBool(nunitNode, nameof(FreakMode), false);
+            // End Diagnostics
 
+            // Adapter Display Options
+            MapDisplayName(GetInnerText(nunitNode, nameof(DisplayName), Verbosity > 0));
+            FullnameSeparator = GetInnerText(nunitNode, nameof(FullnameSeparator), Verbosity > 0)?[0] ?? ':';
+
+            // EndDisplay
+
+
+
+            PreFilter = GetInnerTextAsBool(nunitNode, nameof(PreFilter), false);
+            MapTestCategory(GetInnerText(nunitNode, nameof(VsTestCategoryType), Verbosity > 0));
+            MapWarningTo = MapWarningOutcome(GetInnerText(nunitNode, nameof(MapWarningTo), Verbosity > 0));
+            UseTestNameInConsoleOutput = GetInnerTextAsBool(nunitNode, nameof(UseTestNameInConsoleOutput), false);
             var inProcDataCollectorNode =
                 doc.SelectSingleNode("RunSettings/InProcDataCollectionRunSettings/InProcDataCollectors");
             InProcDataCollectorsAvailable = inProcDataCollectorNode != null &&
@@ -344,29 +400,40 @@ namespace NUnit.VisualStudio.TestAdapter
             // Update NumberOfTestWorkers based on the DisableParallelization and NumberOfTestWorkers from runsettings.
             UpdateNumberOfTestWorkers();
 
-
-            string ValidatedPath(string path, string purpose)
+            void UpdateTestProperties()
             {
-                try
+                foreach (XmlNode node in doc.SelectNodes("RunSettings/TestRunParameters/Parameter"))
                 {
-                    if (string.IsNullOrEmpty(WorkDirectory))
-                    {
-                        return Path.GetFullPath(path);
-                    }
-
-                    if (Path.IsPathRooted(path))
-                    {
-                        return Path.GetFullPath(path);
-                    }
-                    return Path.GetFullPath(Path.Combine(WorkDirectory, path));
-                }
-                catch (Exception)
-                {
-                    _logger.Error($"   Invalid path for {purpose}: {path}");
-                    throw;
+                    var key = node.GetAttribute("name");
+                    var value = node.GetAttribute("value");
+                    if (key != null && value != null)
+                        TestProperties.Add(key, value);
                 }
             }
         }
+
+        private void MapTestCategory(string vsTestCategoryType)
+        {
+            if (vsTestCategoryType == null)
+                return;
+            var ok = TryParse.EnumTryParse(vsTestCategoryType, out VsTestCategoryType result);
+            if (ok)
+                VsTestCategoryType = result;
+            else
+                _logger.Warning($"Invalid value ({vsTestCategoryType}) for VsTestCategoryType, should be either NUnit or MsTest");
+        }
+
+        private void MapDisplayName(string displaynameoptions)
+        {
+            if (displaynameoptions == null)
+                return;
+            var ok = TryParse.EnumTryParse(displaynameoptions, out DisplayNameOptions result);
+            if (ok)
+                DisplayName = result;
+            else
+                _logger.Warning($"Invalid value ({displaynameoptions}) for DisplayNameOptions, should be either Name, Fullname or FullnameSep");
+        }
+
 
         public void SaveRandomSeed(string dirname)
         {
@@ -488,6 +555,39 @@ namespace NUnit.VisualStudio.TestAdapter
                 _logger.Info($"Setting: {xpath} = {res}");
             }
         }
+
+        public TestOutcome MapWarningOutcome(string outcome)
+        {
+            if (outcome == null)
+                return TestOutcome.Skipped;
+
+            bool ok = TryParse.EnumTryParse(outcome, out TestOutcome testoutcome);
+
+            if (!ok)
+            {
+                _logger.Warning(
+                    $"Invalid value ({outcome}) for MapWarningTo, should be either Skipped,Failed,Passed or None");
+                return TestOutcome.Skipped;
+            }
+            return testoutcome;
+        }
+
+        public T MapEnum<T>(string setting, T defaultValue)
+            where T : struct, Enum
+        {
+            if (setting == null)
+                return defaultValue;
+            bool ok = TryParse.EnumTryParse(setting, out T result);
+            if (!ok)
+            {
+                _logger.Warning(
+                    $"Invalid value ({setting}) for {typeof(T)}");
+                return defaultValue;
+            }
+            return result;
+        }
+
+
         #endregion
     }
 }

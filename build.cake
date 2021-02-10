@@ -12,8 +12,8 @@ var configuration = Argument("configuration", "Release");
 // SET PACKAGE VERSION
 //////////////////////////////////////////////////////////////////////
 
-var version = "3.17.0";
-var modifier = "";
+var version = "4.0.0";
+var modifier = "-beta.1";
 
 var dbgSuffix = configuration.ToLower() == "debug" ? "-dbg" : "";
 var packageVersion = version + modifier + dbgSuffix;
@@ -243,7 +243,7 @@ Task("CreateWorkingImage")
         CreateDirectory(PACKAGE_IMAGE_DIR);
         CleanDirectory(PACKAGE_IMAGE_DIR);
 
-        CopyFileToDirectory("LICENSE.txt", PACKAGE_IMAGE_DIR);
+        CopyFileToDirectory("LICENSE", PACKAGE_IMAGE_DIR);
 
         // dotnet publish doesn't work for .NET 3.5
         var net35Files = new FilePath[]
@@ -251,7 +251,8 @@ Task("CreateWorkingImage")
             ADAPTER_BIN_DIR_NET35 + "NUnit3.TestAdapter.dll",
             ADAPTER_BIN_DIR_NET35 + "NUnit3.TestAdapter.pdb",
             ADAPTER_BIN_DIR_NET35 + "nunit.engine.dll",
-            ADAPTER_BIN_DIR_NET35 + "nunit.engine.api.dll"
+            ADAPTER_BIN_DIR_NET35 + "nunit.engine.api.dll",
+            ADAPTER_BIN_DIR_NET35 + "nunit.engine.core.dll"
         };
 
         var net35Dir = PACKAGE_IMAGE_DIR + "build/net35";
