@@ -49,6 +49,12 @@ namespace NUnit.VisualStudio.TestAdapter.Tests
             Assert.That(() => _settings.Load((IDiscoveryContext)null), Throws.ArgumentNullException);
         }
 
+        [TestCase("ÑÐ")]
+        public void Test_ashish(string abc)
+        {
+
+        }
+
         [TestCase(null)]
         [TestCase("")]
         [TestCase("<RunSettings />")]
